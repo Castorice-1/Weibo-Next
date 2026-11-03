@@ -76,6 +76,9 @@ struct ImagePreview {
   @State liveLocalPath: string = '';
   /** 微博图源需要 weibo.com 作为 Referer；贴吧调用保持原值 */
   private imageReferer: string = 'https://tieba.baidu.com/';
+  /** 微博媒体 CDN 对 UA 也有要求；与 WeiboPlus 的 MediaViewer 保持一致。 */
+  private readonly weiboMediaUserAgent: string =
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
   @State showControls: boolean = true;
   @State viewportWidth: number = 360;
   @State viewportHeight: number = 800;
@@ -481,12 +484,12 @@ struct ImagePreview {
     try {
       // Video 组件无法自定义请求头，微博 CDN 对 Referer 敏感，因此先带请求头下载到缓存再本地播放。
       // 实况片段通常只有 1~3 MB，下载完成再播放比流式播放更稳定。
-      const bytes: ArrayBuffer = await HttpClient.getBinary(remoteUrl, {
-        'Accept': 'video/*,*/*;q=0.8',
-        'Referer': this.imageReferer
-      });
+      const bytes: ArrayBuffer = await HttpClient.getBinary(remoteUrl, this.weiboMediaHeaders('video/*,*/*;q=0.8'));
       if (bytes.byteLength === 0) {
         throw new Error('实况内容为空');
+      }
+      if (!this.looksLikeMov(bytes)) {
+        throw new Error('实况内容不是视频');
       }
       const path: string = `${this.context.cacheDir}/weibo_live_preview.mov`;
       const file = await fileIo.open(path,
@@ -727,23 +730,145 @@ struct ImagePreview {
     return out.filter((url: string) => url.length > 0);
   }
 
-  private async writeAsset(uri: string, url: string, headers: Record<string, string>): Promise<void> {
+  private async writeBytes(uri: string, bytes: ArrayBuffer): Promise<void> {
     const dest = await fileIo.open(uri, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE);
     try {
-      const bytes: ArrayBuffer = await HttpClient.getBinary(url, headers);
-      if (bytes.byteLength === 0) {
-        throw new Error('内容为空');
-      }
       await fileIo.write(dest.fd, bytes);
     } finally {
       await fileIo.close(dest);
     }
   }
 
+  /** 微博媒体请求头：Referer + 移动端 UA；贴吧预览保持原有默认 UA。 */
+  private weiboMediaHeaders(accept: string): Record<string, string> {
+    const headers: Record<string, string> = {
+      'Accept': accept,
+      'Referer': this.imageReferer
+    };
+    if (this.imageReferer.indexOf('weibo.com') >= 0) {
+      headers['User-Agent'] = this.weiboMediaUserAgent;
+    }
+    return headers;
+  }
+
+  /** 实况文件是 QuickTime 容器，正常下载应以 4 字节 `ftyp` 开头。 */
+  private looksLikeMov(bytes: ArrayBuffer): boolean {
+    if (bytes.byteLength < 12) {
+      return false;
+    }
+    const view = new Uint8Array(bytes);
+    return view[4] === 0x66 && view[5] === 0x74 && view[6] === 0x79 && view[7] === 0x70;
+  }
+
+  private async writeFilePath(path: string, bytes: ArrayBuffer): Promise<void> {
+    const file = await fileIo.open(path, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+    try {
+      await fileIo.write(file.fd, bytes);
+    } finally {
+      await fileIo.close(file);
+    }
+  }
+
+  private async copyFileToUri(path: string, uri: string): Promise<void> {
+    const src = await fileIo.open(path, fileIo.OpenMode.READ_ONLY);
+    let dest: fileIo.File | null = null;
+    try {
+      dest = await fileIo.open(uri, fileIo.OpenMode.READ_WRITE);
+      await fileIo.copyFile(src.fd, dest.fd);
+    } finally {
+      if (dest !== null) {
+        try {
+          await fileIo.close(dest);
+        } catch (e) {
+        }
+      }
+      try {
+        await fileIo.close(src);
+      } catch (e) {
+      }
+    }
+  }
+
+  private async removeCacheFile(path: string): Promise<void> {
+    try {
+      await fileIo.unlink(path);
+    } catch (e) {
+    }
+  }
+
   /**
-   * 保存当前图片。微博实况照片同时保存静态原图（IMAGE/jpg）与实况视频（VIDEO/mp4，
-   * 内容为微博下发的 .mov，媒体库以 mp4 容器登记以兼容图库索引）。
-   * 两个媒体库资源都在 SaveButton 的临时授权窗口内创建，网络下载则在窗口外进行。
+   * 参考 WeiboPlus：先把原图与实况视频写到应用缓存，再用系统保存确认弹窗一次性
+   * 取得两个媒体库目标 URI，最后 copyFile 写入。相比 SaveButton 里连续 createAsset，
+   * 弹窗一次授权可同时保存图片和视频，不会出现「原图存了、第二条视频被窗口拒绝」。
+   * 返回 1=已保存、0=用户取消、-1=弹窗或复制失败（调用方回退旧保存流程）。
+   */
+  private async saveLivePairByDialog(imageBytes: ArrayBuffer, liveBytes: ArrayBuffer): Promise<number> {
+    const stamp: number = Date.now();
+    const imagePath: string = `${this.context.cacheDir}/weibo_save_${stamp}.jpg`;
+    const livePath: string = `${this.context.cacheDir}/weibo_save_${stamp}.mov`;
+    try {
+      await this.writeFilePath(imagePath, imageBytes);
+      await this.writeFilePath(livePath, liveBytes);
+      const helper = photoAccessHelper.getPhotoAccessHelper(this.context);
+      const configs: photoAccessHelper.PhotoCreationConfig[] = [
+        {
+          fileNameExtension: 'jpg',
+          photoType: photoAccessHelper.PhotoType.IMAGE
+        },
+        {
+          fileNameExtension: 'mov',
+          photoType: photoAccessHelper.PhotoType.VIDEO
+        }
+      ];
+      const destUris: string[] = await helper.showAssetsCreationDialog(
+        [fileUri.getUriFromPath(imagePath), fileUri.getUriFromPath(livePath)], configs);
+      if (destUris.length === 0) {
+        return 0;
+      }
+      if (destUris.length < 2) {
+        return -1;
+      }
+      await this.copyFileToUri(imagePath, destUris[0]);
+      await this.copyFileToUri(livePath, destUris[1]);
+      return 1;
+    } catch (e) {
+      return -1;
+    } finally {
+      await this.removeCacheFile(imagePath);
+      await this.removeCacheFile(livePath);
+    }
+  }
+
+  /**
+   * 实况优先走「缓存 + showAssetsCreationDialog」；任何一步失败返回 -1，
+   * 由 saveCurrentImage 回退到原有的 SaveButton/createAsset 流程。
+   * 返回 -2 表示图片已下载但实况视频无效，调用方只需保存图片并提示实况失败。
+   */
+  private async trySaveLiveByDialog(): Promise<number> {
+    const liveUrl: string = this.currentLiveUrl();
+    if (liveUrl.length === 0) {
+      return -2;
+    }
+    try {
+      const imageBytes: ArrayBuffer = await HttpClient.getBinary(this.urls[this.currentIndex],
+        this.weiboMediaHeaders('image/avif,image/webp,image/apng,image/*,*/*;q=0.8'));
+      if (imageBytes.byteLength === 0) {
+        return -1;
+      }
+      const liveBytes: ArrayBuffer = await HttpClient.getBinary(liveUrl,
+        this.weiboMediaHeaders('video/quicktime,video/*,*/*;q=0.8'));
+      if (liveBytes.byteLength === 0 || !this.looksLikeMov(liveBytes)) {
+        return -2;
+      }
+      return await this.saveLivePairByDialog(imageBytes, liveBytes);
+    } catch (e) {
+      return -1;
+    }
+  }
+
+  /**
+   * 保存当前图片。微博实况照片优先用系统保存弹窗一次写入原图 + 实况视频；
+   * 弹窗不可用或下载失败时，回退到 SaveButton 的 createAsset 流程，保证原图仍能保存。
    */
   private async saveCurrentImage(): Promise<void> {
     if (this.urls.length === 0 || this.saving) {
@@ -755,35 +880,67 @@ struct ImagePreview {
     let liveSaved: boolean = false;
     const isLive: boolean = this.isLiveIndex(this.currentIndex);
     try {
-      const helper = photoAccessHelper.getPhotoAccessHelper(this.context);
-      // SaveButton 的临时授权窗口有限，因此先在窗口内建好媒体库资源并拿到 fd，
-      // 之后的网络下载与写文件不再受该窗口限制。
-      imageUri = await helper.createAsset(photoAccessHelper.PhotoType.IMAGE, 'jpg');
+      // 实况优先走系统保存弹窗：一次授权同时保存原图 + 视频，规避 SaveButton
+      // 授权窗口内第二次 createAsset 被拒绝的问题。
       if (isLive) {
-        try {
-          videoUri = await helper.createAsset(photoAccessHelper.PhotoType.VIDEO, 'mp4');
-        } catch (e) {
-          videoUri = '';
+        const liveResult: number = await this.trySaveLiveByDialog();
+        if (liveResult === 1) {
+          this.getUIContext().getPromptAction().showToast({ message: '原图与实况已保存到相册' });
+          return;
+        }
+        if (liveResult === 0) {
+          this.getUIContext().getPromptAction().showToast({ message: '已取消保存' });
+          return;
         }
       }
-      await this.writeAsset(imageUri, this.urls[this.currentIndex], {
-        'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
-        'Referer': this.imageReferer
-      });
-      if (isLive && videoUri.length > 0) {
-        try {
-          await this.writeAsset(videoUri, this.currentLiveUrl(), {
-            'Accept': 'video/*,*/*;q=0.8',
-            'Referer': this.imageReferer
-          });
-          liveSaved = true;
-        } catch (e) {
-          // 实况视频写入失败不能回滚已成功的原图，只清掉空视频资源
+      const helper = photoAccessHelper.getPhotoAccessHelper(this.context);
+      // 先在 SaveButton 的授权窗口内建好图片资源，后续网络下载不再受窗口限制。
+      imageUri = await helper.createAsset(photoAccessHelper.PhotoType.IMAGE, 'jpg');
+      const imageBytes: ArrayBuffer = await HttpClient.getBinary(this.urls[this.currentIndex],
+        this.weiboMediaHeaders('image/avif,image/webp,image/apng,image/*,*/*;q=0.8'));
+      if (imageBytes.byteLength === 0) {
+        throw new Error('原图内容为空');
+      }
+      await this.writeBytes(imageUri, imageBytes);
+      let liveBytes: ArrayBuffer | null = null;
+      if (isLive) {
+        const liveUrl: string = this.currentLiveUrl();
+        if (liveUrl.length > 0) {
           try {
-            await photoAccessHelper.MediaAssetChangeRequest.deleteAssets(this.context, [videoUri]);
-          } catch (cleanupError) {
+            // 直接请求 videoSrc 播放器地址，由服务端 302 到带签名的 .mov；不要解码 livephoto 参数。
+            const downloaded: ArrayBuffer = await HttpClient.getBinary(liveUrl,
+              this.weiboMediaHeaders('video/quicktime,video/*,*/*;q=0.8'));
+            if (downloaded.byteLength > 0 && this.looksLikeMov(downloaded)) {
+              liveBytes = downloaded;
+            }
+          } catch (e) {
+            liveBytes = null;
           }
-          videoUri = '';
+        }
+      }
+      if (liveBytes !== null) {
+        const liveData: ArrayBuffer = liveBytes;
+        try {
+          videoUri = await helper.createAsset(photoAccessHelper.PhotoType.VIDEO, 'mov');
+        } catch (e) {
+          // 部分机型媒体库不接受 mov 扩展名，退回 mp4 容器登记同一份 QuickTime 数据。
+          try {
+            videoUri = await helper.createAsset(photoAccessHelper.PhotoType.VIDEO, 'mp4');
+          } catch (fallbackError) {
+            videoUri = '';
+          }
+        }
+        if (videoUri.length > 0) {
+          try {
+            await this.writeBytes(videoUri, liveData);
+            liveSaved = true;
+          } catch (e) {
+            try {
+              await photoAccessHelper.MediaAssetChangeRequest.deleteAssets(this.context, [videoUri]);
+            } catch (cleanupError) {
+            }
+            videoUri = '';
+          }
         }
       }
       if (liveSaved) {
