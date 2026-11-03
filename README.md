@@ -374,7 +374,7 @@ STRIP_SIGNING=0 bash scripts/ci/build-hap.sh debug default
 
 | 项目 | 协议 | 参考内容 |
 | --- | --- | --- |
-| [TiebaPura](https://github.com/a307608689-afk/TiebaPura) | - | 交互设计与架构设计参考 |
+| [TiebaPura](https://github.com/a307608689-afk/TiebaPura) | GPL-3.0 | 交互设计与架构设计参考 |
 | [WeiboPura](https://github.com/haohaoai0/WeiboPura) | GPL-3.0 | 接口路径与协议字段模型参考 |
 
 ## 许可证
