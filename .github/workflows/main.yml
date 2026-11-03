@@ -34,6 +34,12 @@ env:
   CLT_SHA256: b046da0a1a06fe13b3d82d198738abc54788d79c6c9d07c36617ec7fc31a3b3b
   BUILD_MODE: ${{ github.event.inputs.build_mode || 'debug' }}
   PRODUCT: ${{ github.event.inputs.product || 'default' }}
+  # HarmonyOS tooling (hvigor + pnpm) requires an .npmrc mapping the @ohos
+  # scope to Huawei's registry.  build-hap.sh also does this defensively;
+  # setting it here keeps the "Show tool versions" step quiet and makes the
+  # requirement explicit in the workflow.
+  OHOS_SCOPE_REGISTRY: https://repo.harmonyos.com/npm/
+  NPM_REGISTRY: https://repo.huaweicloud.com/repository/npm/
 
 jobs:
   build:
@@ -45,10 +51,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -58,7 +64,7 @@ jobs:
       # because restoring one 6 GB cache entry is slower than unzipping locally.
       - name: Cache command-line tools
         id: clt-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/harmonyos-clt.zip
           key: harmonyos-clt-26.0.0.461-linux-x64-v1
@@ -144,6 +150,25 @@ jobs:
           echo "CLT_HOME=$CLT_HOME"
           echo "BIN_DIR=$BIN_DIR"
           ls -la "$CLT_HOME" | head -30
+
+      # HarmonyOS tooling needs an .npmrc that maps the @ohos scope to Huawei's
+      # registry.  A fresh runner has no ~/.npmrc, which triggers:
+      #   hvigor ERROR: 00303137 ... No npmrc file is matched
+      #   ERR_PNPM_FETCH_404 ... @ohos/hvigor is not in the npm registry
+      # build-hap.sh does the same thing; doing it here too keeps the
+      # "Show tool versions" step quiet and documents the requirement.
+      - name: Configure npm registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          NPMRC="${HOME}/.npmrc"
+          touch "$NPMRC"
+          grep -qE '^[[:space:]]*@ohos:registry[[:space:]]*=' "$NPMRC" || \
+            printf '@ohos:registry=%s\n' "$OHOS_SCOPE_REGISTRY" >> "$NPMRC"
+          grep -qE '^[[:space:]]*registry[[:space:]]*=' "$NPMRC" || \
+            printf 'registry=%s\n' "$NPM_REGISTRY" >> "$NPMRC"
+          echo "info: active .npmrc:"
+          grep -vE '(_authToken|_auth|password)[[:space:]]*=' "$NPMRC" | sed 's/^/  /'
 
       - name: Show tool versions
         shell: bash
@@ -231,7 +256,7 @@ jobs:
           ls -lh dist
 
       - name: Upload HAP
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: WeiboPura-${{ env.BUILD_MODE }}-${{ env.PRODUCT }}-hap
           path: dist/*.hap
