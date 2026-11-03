@@ -13,6 +13,7 @@ import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { image } from '@kit.ImageKit';
 import { harmonyShare, systemShare } from '@kit.ShareKit';
 import { syncWeiboSplitNavigation } from '../common/WeiboNavigationLayout';
+import { LivePhotoBadge } from '../components/CommonComponents';
 
 /**
  * Routed post detail. It deliberately owns its scroll, comments, and bottom
@@ -180,6 +181,7 @@ export struct WeiboPostDetail {
       userAvatar: source.userAvatar,
       text: source.text,
       pictures: source.pictures,
+      livePictures: source.livePictures,
       videoUrl: source.videoUrl,
       videoCoverUrl: source.videoCoverUrl,
       createdAt: source.createdAt,
@@ -474,13 +476,13 @@ export struct WeiboPostDetail {
     return rows * this.pictureCellHeight(pictures) + (rows - 1) * Spacing.sm;
   }
 
-  private openImagePreview(urls: string[], index: number): void {
+  private openImagePreview(urls: string[], index: number, liveUrls: string[]): void {
     if (urls.length === 0) {
       return;
     }
     this.getUIContext().getRouter().pushUrl({
       url: 'pages/ImagePreview',
-      params: { urls: urls, index: index }
+      params: { urls: urls, index: index, liveUrls: liveUrls, source: 'weibo' }
     }).catch((): void => {
       this.getUIContext().getPromptAction().showToast({ message: '原图预览打开失败，请稍后重试' });
     });
@@ -529,25 +531,39 @@ export struct WeiboPostDetail {
   }
 
   @Builder
-  PictureGrid(pictures: string[]) {
+  PictureGrid(pictures: string[], livePictures: string[]) {
     if (this.visiblePictureCount(pictures) === 1) {
-      Image(pictures[0])
-        .width('100%')
-        .height(260)
-        .constraintSize({ maxWidth: 460 })
-        .objectFit(ImageFit.Cover)
-        .borderRadius(Radius.md)
-        .onClick((): void => { this.openImagePreview(pictures, 0); })
+      Stack({ alignContent: Alignment.BottomStart }) {
+        Image(pictures[0])
+          .width('100%')
+          .height('100%')
+          .objectFit(ImageFit.Cover)
+          .borderRadius(Radius.md)
+        if (livePictures.length > 0 && livePictures[0].length > 0) {
+          LivePhotoBadge()
+        }
+      }
+      .width('100%')
+      .height(260)
+      .constraintSize({ maxWidth: 460 })
+      .onClick((): void => { this.openImagePreview(pictures, 0, livePictures); })
     } else if (this.visiblePictureCount(pictures) > 1) {
       Grid() {
         ForEach(pictures.slice(0, this.visiblePictureCount(pictures)), (picture: string, index: number): void => {
           GridItem() {
-            Image(picture)
-              .width('100%')
-              .height(this.pictureCellHeight(pictures))
-              .objectFit(ImageFit.Cover)
-              .borderRadius(Radius.md)
-              .onClick((): void => { this.openImagePreview(pictures, index); })
+            Stack({ alignContent: Alignment.BottomStart }) {
+              Image(picture)
+                .width('100%')
+                .height('100%')
+                .objectFit(ImageFit.Cover)
+                .borderRadius(Radius.md)
+              if (index < livePictures.length && livePictures[index].length > 0) {
+                LivePhotoBadge()
+              }
+            }
+            .width('100%')
+            .height(this.pictureCellHeight(pictures))
+            .onClick((): void => { this.openImagePreview(pictures, index, livePictures); })
           }
         }, (picture: string, index: number): string => `${index}`)
       }
@@ -621,7 +637,7 @@ export struct WeiboPostDetail {
         .fontColor(Theme.textPrimary(this.isDark))
         .width('100%')
       if (repost.pictures.length > 0) {
-        this.PictureGrid(repost.pictures)
+        this.PictureGrid(repost.pictures, repost.livePictures)
       }
     }
     .width('100%')
@@ -674,7 +690,7 @@ export struct WeiboPostDetail {
         .width('100%')
       this.VideoPlayer(currentPost)
       if (currentPost.pictures.length > 0) {
-        this.PictureGrid(currentPost.pictures)
+        this.PictureGrid(currentPost.pictures, currentPost.livePictures)
       }
       if (currentPost.repost !== null) {
         this.RepostCard(currentPost.repost)

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * TiebaPura - HarmonyOS 原生 ArkTS 实现的第三方百度贴吧客户端
  * Copyright (C) 2026 a307608689-afk
  *
@@ -19,7 +19,7 @@
 import { common } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
-import { fileIo } from '@kit.CoreFileKit';
+import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { HttpClient } from '../network/HttpClient';
 import { TiebaService, ThreadDetailResult } from '../service/TiebaService';
 import { FloorItem } from '../model/DataModel';
@@ -67,6 +67,15 @@ struct ImagePreview {
     this.fontSizeTick++;
   }
   @State saving: boolean = false;
+  // ===== 实况照片（Weibo Live Photo，2026-11-04）=====
+  /** 与 urls 逐项对齐；空串表示该张是普通图片 */
+  @State liveUrls: string[] = [];
+  @State livePlaying: boolean = false;
+  @State liveLoading: boolean = false;
+  /** 已下载到应用缓存的 .mov 路径；Video 组件不能携带 Referer，先带请求头下载再本地播放 */
+  @State liveLocalPath: string = '';
+  /** 微博图源需要 weibo.com 作为 Referer；贴吧调用保持原值 */
+  private imageReferer: string = 'https://tieba.baidu.com/';
   @State showControls: boolean = true;
   @State viewportWidth: number = 360;
   @State viewportHeight: number = 800;
@@ -88,6 +97,7 @@ struct ImagePreview {
   private panBaseY: number = 0;
   private dragReady: boolean = false;
   private isClosing: boolean = false;
+  private liveController: VideoController = new VideoController();
   private context: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
 
   aboutToAppear(): void {
@@ -109,6 +119,7 @@ struct ImagePreview {
     if (params && params.index !== undefined) {
       this.currentIndex = Number(params.index) || 0;
     }
+    this.initLiveParams(params);
     this.isDark = isDarkMode();
     // 流式补页上下文：只有从帖子详情页带上下文进来才有补页能力，其它调用点（单图预览等）保持原行为
     this.initImageStream(params);
@@ -160,7 +171,45 @@ struct ImagePreview {
     this.streamEnded = false;
   }
 
+  /**
+   * 解析实况照片参数（WeiboFeed / WeiboPostDetail / WeiboHomeTab 等传入）。
+   * liveUrls 与 urls 逐项对齐，空串代表普通静态图；来源为微博时切换图片 Referer。
+   */
+  private initLiveParams(params: Record<string, Object> | undefined): void {
+    let parsed: string[] = [];
+    if (params) {
+      const routeLive: Object | undefined = params.liveUrls;
+      if (Array.isArray(routeLive)) {
+        parsed = (routeLive as Object[]).map((item: Object) => `${item}`);
+      } else if (typeof routeLive === 'string' && routeLive.length > 0) {
+        parsed = routeLive.split(',').map((item: string) => {
+          try {
+            return decodeURIComponent(item);
+          } catch (e) {
+            return item;
+          }
+        });
+      }
+      if (`${params.source}` === 'weibo') {
+        this.imageReferer = 'https://weibo.com/';
+      }
+    }
+    while (parsed.length < this.urls.length) {
+      parsed.push('');
+    }
+    this.liveUrls = parsed.slice(0, this.urls.length);
+  }
+
+  private isLiveIndex(idx: number): boolean {
+    return idx >= 0 && idx < this.liveUrls.length && this.liveUrls[idx].length > 0;
+  }
+
+  private currentLiveUrl(): string {
+    return this.isLiveIndex(this.currentIndex) ? this.liveUrls[this.currentIndex] : '';
+  }
+
   aboutToDisappear(): void {
+    this.stopLivePlayback();
     this.restoreStatusBar();
   }
 
@@ -194,6 +243,30 @@ struct ImagePreview {
                 .objectFit(ImageFit.Contain)
                 .scale({ x: this.getScale(idx), y: this.getScale(idx) })
                 .translate({ x: this.getPanX(idx), y: this.getPanY(idx) })
+
+              // 实况视频：与静态图完全重叠；仅当前页且已加载完成时挂载，避免多页同时解码
+              if (idx === this.currentIndex && this.livePlaying && this.liveLocalPath.length > 0) {
+                Video({
+                  src: fileUri.getUriFromPath(this.liveLocalPath),
+                  controller: this.liveController
+                })
+                  .width('100%')
+                  .height('100%')
+                  .objectFit(ImageFit.Contain)
+                  .scale({ x: this.getScale(idx), y: this.getScale(idx) })
+                  .translate({ x: this.getPanX(idx), y: this.getPanY(idx) })
+                  .controls(false)
+                  .autoPlay(true)
+                  .loop(false)
+                  .onFinish(() => {
+                    // 实况只播放一遍，播完回到静态图，和系统实况照片的观感一致
+                    this.stopLivePlayback();
+                  })
+                  .onError(() => {
+                    this.livePlaying = false;
+                    this.getUIContext().getPromptAction().showToast({ message: '实况视频播放失败' });
+                  })
+              }
 
               // 透明手势层：只切换手势集合，不触碰图片节点生命周期
               if (idx === this.currentIndex && this.getScale(idx) > 1.05) {
@@ -266,6 +339,7 @@ struct ImagePreview {
         .onChange((index: number) => {
           this.currentIndex = index;
           this.resetZoom();
+          this.stopLivePlayback();
           // 流式补页触发：距已加载图片末尾还剩 3 张时开始拉下一页，尽量让用户滑到头时新图已就位
           if (index >= this.urls.length - 3) {
             this.appendStreamPage();
@@ -294,6 +368,20 @@ struct ImagePreview {
             .padding({ left: 12, right: 12, top: 4, bottom: 4 })
 
             Blank()
+
+            if (this.isLiveIndex(this.currentIndex)) {
+              Text(this.liveLoading ? '实况加载中' : (this.livePlaying ? '停止实况' : '播放实况'))
+                .fontSize(fs(13, this.fontScale))
+                .fontColor(Color.White)
+                .backgroundColor(Theme.glassControlSolid(true))
+                .border({ width: 0.5, color: Theme.glassControlLine(true) })
+                .borderRadius(26)
+                .padding({ left: 12, right: 12, top: 4, bottom: 4 })
+                .margin({ left: 8 })
+                .onClick(() => {
+                  this.toggleLivePlayback();
+                })
+            }
           }
           .width('100%')
           .padding({ left: Spacing.lg, right: Spacing.lg, top: 12, bottom: 10 })
@@ -315,7 +403,7 @@ struct ImagePreview {
             .shadow({ radius: 12, color: '#40000000', offsetY: 2 })
             .onClick(() => { this.closePreview(); })
 
-            // 保存改用系统安全控件 SaveButton：点击即临时获得图库写入授权（约 10 秒），
+            // 保存改用系统安全控件 SaveButton：点击即临时获得图库写入授权（窗口有限），
             // 因此无需在 module.json5 声明 READ/WRITE_IMAGEVIDEO，也无需运行时弹权限申请。
             // 外观为 48×48 实底圆钮（与左侧关闭钮逐项一致：同色实底 + 0.5vp 白描边 + 同款阴影），
             // 只把内层图标换成系统保存图标。
@@ -377,6 +465,57 @@ struct ImagePreview {
     .renderGroup(true)
   }
 
+  private async toggleLivePlayback(): Promise<void> {
+    if (this.livePlaying) {
+      this.stopLivePlayback();
+      return;
+    }
+    if (this.liveLoading) {
+      return;
+    }
+    const remoteUrl: string = this.currentLiveUrl();
+    if (remoteUrl.length === 0) {
+      return;
+    }
+    this.liveLoading = true;
+    try {
+      // Video 组件无法自定义请求头，微博 CDN 对 Referer 敏感，因此先带请求头下载到缓存再本地播放。
+      // 实况片段通常只有 1~3 MB，下载完成再播放比流式播放更稳定。
+      const bytes: ArrayBuffer = await HttpClient.getBinary(remoteUrl, {
+        'Accept': 'video/*,*/*;q=0.8',
+        'Referer': this.imageReferer
+      });
+      if (bytes.byteLength === 0) {
+        throw new Error('实况内容为空');
+      }
+      const path: string = `${this.context.cacheDir}/weibo_live_preview.mov`;
+      const file = await fileIo.open(path,
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      try {
+        await fileIo.write(file.fd, bytes);
+      } finally {
+        await fileIo.close(file);
+      }
+      this.liveLocalPath = path;
+      this.livePlaying = true;
+    } catch (e) {
+      this.getUIContext().getPromptAction().showToast({ message: '实况视频加载失败，请稍后重试' });
+    } finally {
+      this.liveLoading = false;
+    }
+  }
+
+  private stopLivePlayback(): void {
+    if (this.livePlaying) {
+      try {
+        this.liveController.stop();
+      } catch (e) {
+      }
+    }
+    this.livePlaying = false;
+    this.liveLocalPath = '';
+  }
+
   private getScale(idx: number): number {
     return idx === this.currentIndex ? this.zoomScale : 1;
   }
@@ -386,6 +525,7 @@ struct ImagePreview {
       return;
     }
     this.isClosing = true;
+    this.stopLivePlayback();
     this.getUIContext().animateTo({ duration: 160, curve: Curve.EaseIn }, (): void => {
       this.previewOpacity = 0;
       this.previewScale = 0.98;
@@ -403,7 +543,10 @@ struct ImagePreview {
    */
   private showSaveControls(): void {
     this.showControls = true;
-    this.getUIContext().getPromptAction().showToast({ message: '点击右下角保存按钮即可保存到相册' });
+    const message: string = this.isLiveIndex(this.currentIndex)
+      ? '点击右下角保存按钮，原图与实况将保存到相册'
+      : '点击右下角保存按钮即可保存到相册';
+    this.getUIContext().getPromptAction().showToast({ message: message });
   }
 
   private getPanX(idx: number): number {
@@ -584,37 +727,84 @@ struct ImagePreview {
     return out.filter((url: string) => url.length > 0);
   }
 
+  private async writeAsset(uri: string, url: string, headers: Record<string, string>): Promise<void> {
+    const dest = await fileIo.open(uri, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE);
+    try {
+      const bytes: ArrayBuffer = await HttpClient.getBinary(url, headers);
+      if (bytes.byteLength === 0) {
+        throw new Error('内容为空');
+      }
+      await fileIo.write(dest.fd, bytes);
+    } finally {
+      await fileIo.close(dest);
+    }
+  }
+
+  /**
+   * 保存当前图片。微博实况照片同时保存静态原图（IMAGE/jpg）与实况视频（VIDEO/mp4，
+   * 内容为微博下发的 .mov，媒体库以 mp4 容器登记以兼容图库索引）。
+   * 两个媒体库资源都在 SaveButton 的临时授权窗口内创建，网络下载则在窗口外进行。
+   */
   private async saveCurrentImage(): Promise<void> {
     if (this.urls.length === 0 || this.saving) {
       return;
     }
     this.saving = true;
-    let createdUri: string = '';
+    let imageUri: string = '';
+    let videoUri: string = '';
+    let liveSaved: boolean = false;
+    const isLive: boolean = this.isLiveIndex(this.currentIndex);
     try {
       const helper = photoAccessHelper.getPhotoAccessHelper(this.context);
-      // SaveButton 的临时授权窗口很短（约 10 秒），因此先在窗口内建好媒体库资源并拿到 fd，
+      // SaveButton 的临时授权窗口有限，因此先在窗口内建好媒体库资源并拿到 fd，
       // 之后的网络下载与写文件不再受该窗口限制。
-      createdUri = await helper.createAsset(photoAccessHelper.PhotoType.IMAGE, 'jpg');
-      const dest = await fileIo.open(createdUri, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE);
-      try {
-        const imageUrl: string = this.urls[this.currentIndex];
-        const bytes: ArrayBuffer = await HttpClient.getBinary(imageUrl, {
-          'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
-          'Referer': 'https://tieba.baidu.com/'
-        });
-        if (bytes.byteLength === 0) {
-          throw new Error('图片内容为空');
-        }
-        await fileIo.write(dest.fd, bytes);
-      } finally {
-        await fileIo.close(dest);
-      }
-      this.getUIContext().getPromptAction().showToast({ message: '已保存到图库' });
-    } catch (e) {
-      // 写入失败时清掉刚建好的空资源，避免图库里残留空白图片
-      if (createdUri.length > 0) {
+      imageUri = await helper.createAsset(photoAccessHelper.PhotoType.IMAGE, 'jpg');
+      if (isLive) {
         try {
-          await photoAccessHelper.MediaAssetChangeRequest.deleteAssets(this.context, [createdUri]);
+          videoUri = await helper.createAsset(photoAccessHelper.PhotoType.VIDEO, 'mp4');
+        } catch (e) {
+          videoUri = '';
+        }
+      }
+      await this.writeAsset(imageUri, this.urls[this.currentIndex], {
+        'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+        'Referer': this.imageReferer
+      });
+      if (isLive && videoUri.length > 0) {
+        try {
+          await this.writeAsset(videoUri, this.currentLiveUrl(), {
+            'Accept': 'video/*,*/*;q=0.8',
+            'Referer': this.imageReferer
+          });
+          liveSaved = true;
+        } catch (e) {
+          // 实况视频写入失败不能回滚已成功的原图，只清掉空视频资源
+          try {
+            await photoAccessHelper.MediaAssetChangeRequest.deleteAssets(this.context, [videoUri]);
+          } catch (cleanupError) {
+          }
+          videoUri = '';
+        }
+      }
+      if (liveSaved) {
+        this.getUIContext().getPromptAction().showToast({ message: '原图与实况已保存到相册' });
+      } else if (isLive) {
+        this.getUIContext().getPromptAction().showToast({ message: '原图已保存，实况视频保存失败' });
+      } else {
+        this.getUIContext().getPromptAction().showToast({ message: '原图已保存到相册' });
+      }
+    } catch (e) {
+      // 写入失败时清掉刚建好的空资源，避免图库里残留空白图片/视频
+      const stale: string[] = [];
+      if (imageUri.length > 0) {
+        stale.push(imageUri);
+      }
+      if (videoUri.length > 0) {
+        stale.push(videoUri);
+      }
+      if (stale.length > 0) {
+        try {
+          await photoAccessHelper.MediaAssetChangeRequest.deleteAssets(this.context, stale);
         } catch (cleanupError) {
         }
       }

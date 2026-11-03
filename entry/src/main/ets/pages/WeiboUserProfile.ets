@@ -93,6 +93,7 @@ export struct WeiboUserProfile {
       abstract: post.repost === null ? '' : post.repost.text,
       firstImage: firstImage,
       images: post.pictures,
+      imageLiveUrls: post.livePictures,
       videoUrl: post.videoUrl,
       videoCoverUrl: post.videoCoverUrl,
       createTime: post.createdAt,
@@ -115,11 +116,16 @@ export struct WeiboUserProfile {
     syncWeiboSplitNavigation(this.weiboNavStack);
   }
 
-  private openImagePreview(urls: string[], index: number): void {
+  private openImagePreview(urls: string[], index: number, liveUrls: string[]): void {
     if (urls.length === 0) {
       return;
     }
-    this.getUIContext().getRouter().pushUrl({ url: 'pages/ImagePreview', params: { urls: urls, index: index } });
+    this.getUIContext().getRouter().pushUrl({
+      url: 'pages/ImagePreview',
+      params: { urls: urls, index: index, liveUrls: liveUrls, source: 'weibo' }
+    }).catch((): void => {
+      this.getUIContext().getPromptAction().showToast({ message: '原图预览打开失败，请稍后重试' });
+    });
   }
 
   @Builder
@@ -254,7 +260,9 @@ export struct WeiboUserProfile {
                 onTap: (_id: string): void => { this.openPost(post); },
                 onComment: (_id: string): void => { this.openPost(post); },
                 onAvatarTap: (_id: string, _name: string): void => { this.openPost(post); },
-                onImageTap: (urls: string[], index: number): void => { this.openImagePreview(urls, index); },
+                onImageTap: (urls: string[], index: number, liveUrls?: string[]): void => {
+                  this.openImagePreview(urls, index, liveUrls ?? []);
+                },
                 skipImageCache: true
               })
             }, (post: WeiboPost): string => post.id)

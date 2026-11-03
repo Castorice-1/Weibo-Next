@@ -4,6 +4,7 @@ import { WeiboAuthManager } from '../service/WeiboAuthManager';
 import { WeiboService } from '../service/WeiboService';
 import { Breakpoint, CARD_COLUMNS_KEY, ImmBlur, ImmMaterial, Radius, Spacing, Theme, fs, isDarkMode, isLargeScreenForm, isWideFormDevice as detectWideFormDevice, overrideColumns, readColumnMode } from '../common/Theme';
 import { ShareUtil } from '../common/ShareUtil';
+import { LivePhotoBadge } from '../components/CommonComponents';
 import { HdsNavigation, HdsNavigationTitleMode, HdsTabs, ScrollEffectType, hdsMaterial } from '@kit.UIDesignKit';
 
 /** HDS mini title bar height below the system status-bar safe area. */
@@ -232,6 +233,7 @@ export struct WeiboFeed {
       userAvatar: post.userAvatar,
       text: post.text,
       pictures: post.pictures,
+      livePictures: post.livePictures,
       videoUrl: post.videoUrl,
       videoCoverUrl: post.videoCoverUrl,
       createdAt: post.createdAt,
@@ -478,38 +480,52 @@ export struct WeiboFeed {
     return rows * this.pictureGridCellHeight(pictures) + (rows - 1) * gap;
   }
 
-  private openImagePreview(urls: string[], index: number): void {
+  private openImagePreview(urls: string[], index: number, liveUrls: string[]): void {
     if (urls.length === 0) {
       return;
     }
     this.getUIContext().getRouter().pushUrl({
       url: 'pages/ImagePreview',
-      params: { urls: urls, index: index }
+      params: { urls: urls, index: index, liveUrls: liveUrls, source: 'weibo' }
     }).catch((): void => {
       this.getUIContext().getPromptAction().showToast({ message: '原图预览打开失败，请稍后重试' });
     });
   }
 
   @Builder
-  PictureGrid(pictures: string[]) {
+  PictureGrid(pictures: string[], livePictures: string[]) {
     if (this.pictureCount(pictures) === 1) {
-      Image(pictures[0])
-        .width('100%')
-        .height(210)
-        .constraintSize({ maxWidth: 360 })
-        .objectFit(ImageFit.Cover)
-        .borderRadius(Radius.md)
-        .onClick((): void => { this.openImagePreview(pictures, 0); })
+      Stack({ alignContent: Alignment.BottomStart }) {
+        Image(pictures[0])
+          .width('100%')
+          .height('100%')
+          .objectFit(ImageFit.Cover)
+          .borderRadius(Radius.md)
+        if (livePictures.length > 0 && livePictures[0].length > 0) {
+          LivePhotoBadge()
+        }
+      }
+      .width('100%')
+      .height(210)
+      .constraintSize({ maxWidth: 360 })
+      .onClick((): void => { this.openImagePreview(pictures, 0, livePictures); })
     } else if (this.pictureCount(pictures) > 1) {
       Grid() {
         ForEach(pictures.slice(0, this.pictureCount(pictures)), (picture: string, index: number): void => {
           GridItem() {
-            Image(picture)
-              .width('100%')
-              .height(this.pictureGridCellHeight(pictures))
-              .objectFit(ImageFit.Cover)
-              .borderRadius(Radius.md)
-              .onClick((): void => { this.openImagePreview(pictures, index); })
+            Stack({ alignContent: Alignment.BottomStart }) {
+              Image(picture)
+                .width('100%')
+                .height('100%')
+                .objectFit(ImageFit.Cover)
+                .borderRadius(Radius.md)
+              if (index < livePictures.length && livePictures[index].length > 0) {
+                LivePhotoBadge()
+              }
+            }
+            .width('100%')
+            .height(this.pictureGridCellHeight(pictures))
+            .onClick((): void => { this.openImagePreview(pictures, index, livePictures); })
           }
         }, (picture: string, index: number): string => `${index}`)
       }
@@ -591,7 +607,7 @@ export struct WeiboFeed {
           .width('100%')
       }
       if (repost.pictures.length > 0) {
-        this.PictureGrid(repost.pictures)
+        this.PictureGrid(repost.pictures, repost.livePictures)
       }
     }
     .width('100%')
@@ -632,7 +648,7 @@ export struct WeiboFeed {
         .width('100%')
       this.VideoPlayer(post)
       if (post.pictures.length > 0) {
-        this.PictureGrid(post.pictures)
+        this.PictureGrid(post.pictures, post.livePictures)
       }
       if (post.repost !== null) {
         this.RepostSummary(post.repost)

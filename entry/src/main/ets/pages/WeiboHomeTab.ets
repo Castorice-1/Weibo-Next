@@ -362,6 +362,7 @@ export struct WeiboHomeTab {
       abstract: post.repost === null ? '' : post.repost.text,
       firstImage: firstImage,
       images: post.pictures,
+      imageLiveUrls: post.livePictures,
       videoUrl: post.videoUrl,
       videoCoverUrl: post.videoCoverUrl,
       createTime: post.createdAt,
@@ -388,13 +389,13 @@ export struct WeiboHomeTab {
     this.onOpenUserProfile(id, name);
   }
 
-  private openImagePreview(urls: string[], index: number): void {
+  private openImagePreview(urls: string[], index: number, liveUrls: string[]): void {
     if (urls.length === 0) {
       return;
     }
     this.getUIContext().getRouter().pushUrl({
       url: 'pages/ImagePreview',
-      params: { urls: urls, index: index }
+      params: { urls: urls, index: index, liveUrls: liveUrls, source: 'weibo' }
     }).catch((): void => {
       this.getUIContext().getPromptAction().showToast({ message: '原图预览打开失败，请稍后重试' });
     });
@@ -415,6 +416,7 @@ export struct WeiboHomeTab {
       userAvatar: post.userAvatar,
       text: post.text,
       pictures: post.pictures,
+      livePictures: post.livePictures,
       videoUrl: post.videoUrl,
       videoCoverUrl: post.videoCoverUrl,
       createdAt: post.createdAt,
@@ -495,7 +497,9 @@ export struct WeiboHomeTab {
       onLike: (_id: string, _postId: string, liked: boolean): void => { this.toggleLike(post, liked); },
       onShare: (data: ThreadSharePayload): void => { this.onShare(data); },
       onAvatarTap: (id: string, name: string): void => { this.openUserProfile(id, name); },
-      onImageTap: (urls: string[], index: number): void => { this.openImagePreview(urls, index); },
+      onImageTap: (urls: string[], index: number, liveUrls?: string[]): void => {
+        this.openImagePreview(urls, index, liveUrls ?? []);
+      },
       skipImageCache: true
     })
   }
