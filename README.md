@@ -1,4 +1,4 @@
-# WeiboPura
+# Weibo
 
 > 一款面向 HarmonyOS 的原生 ArkTS / ArkUI 微博浏览客户端原型。
 
