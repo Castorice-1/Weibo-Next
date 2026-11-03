@@ -1,0 +1,255 @@
+name: Build HarmonyOS HAP
+
+# Manual run from the Actions tab, or push a tag such as v1.0.0.
+on:
+  workflow_dispatch:
+    inputs:
+      build_mode:
+        description: Build mode
+        required: true
+        default: debug
+        type: choice
+        options:
+          - debug
+          - release
+      product:
+        description: Product name in build-profile.json5
+        required: true
+        default: default
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harmonyos-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned so a changed mirror cannot silently change the compiler.
+  CLT_VERSION: 26.0.0.461
+  CLT_SHA256: b046da0a1a06fe13b3d82d198738abc54788d79c6c9d07c36617ec7fc31a3b3b
+  BUILD_MODE: ${{ github.event.inputs.build_mode || 'debug' }}
+  PRODUCT: ${{ github.event.inputs.product || 'default' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # The signing step is skipped unless a keystore secret is configured.
+      HAS_HAP_SIGNING: ${{ secrets.HAP_SIGN_P12 != '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # The Linux command-line tools are ~2.3 GB.  Caching the split archive
+      # avoids re-downloading it on every run; the extracted tree is not cached
+      # because restoring one 6 GB cache entry is slower than unzipping locally.
+      - name: Cache command-line tools
+        id: clt-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/harmonyos-clt.zip
+          key: harmonyos-clt-26.0.0.461-linux-x64-v1
+
+      - name: Download command-line tools
+        if: steps.clt-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE="$RUNNER_TEMP/harmonyos-clt.zip"
+          PART_DIR="$RUNNER_TEMP/harmonyos-clt-parts"
+          rm -rf "$PART_DIR" "$ARCHIVE"
+          mkdir -p "$PART_DIR"
+
+          # GitHub release assets are limited to 2 GiB, so the upstream mirror
+          # publishes one zip as two parts.  Both sizes and the concatenated
+          # SHA-256 are pinned below.
+          BASE="https://github.com/jerry-271828/harmonyos-commandline-tools/releases/download/v${CLT_VERSION}"
+          curl -fL --retry 5 --retry-all-errors --connect-timeout 30 \
+            -o "$PART_DIR/clt.zip.part00" "$BASE/clt.zip.part00"
+          curl -fL --retry 5 --retry-all-errors --connect-timeout 30 \
+            -o "$PART_DIR/clt.zip.part01" "$BASE/clt.zip.part01"
+
+          test "$(stat -c%s "$PART_DIR/clt.zip.part00")" -eq 1992294400
+          test "$(stat -c%s "$PART_DIR/clt.zip.part01")" -eq 379644657
+          cat "$PART_DIR/clt.zip.part00" "$PART_DIR/clt.zip.part01" > "$ARCHIVE"
+          rm -rf "$PART_DIR"
+
+      - name: Verify command-line tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "${CLT_SHA256}  $RUNNER_TEMP/harmonyos-clt.zip" | sha256sum -c -
+
+      - name: Extract and configure SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          CLT_DIR="$RUNNER_TEMP/harmonyos-clt"
+          rm -rf "$CLT_DIR"
+          mkdir -p "$CLT_DIR"
+          unzip -q "$RUNNER_TEMP/harmonyos-clt.zip" -d "$CLT_DIR"
+
+          HVIGORW="$(find "$CLT_DIR" -type f -path '*/bin/hvigorw' -print -quit)"
+          if [ -z "$HVIGORW" ]; then
+            HVIGORW="$(find "$CLT_DIR" -name hvigorw -print -quit)"
+          fi
+          if [ -z "$HVIGORW" ]; then
+            echo "error: hvigorw not found in the command-line tools archive" >&2
+            find "$CLT_DIR" -maxdepth 3 -type d -print | head -50
+            exit 1
+          fi
+          BIN_DIR="$(cd "$(dirname "$HVIGORW")" && pwd)"
+          if [ -d "$BIN_DIR/../sdk" ]; then
+            CLT_HOME="$(cd "$BIN_DIR/.." && pwd)"
+          elif [ -d "$BIN_DIR/../../sdk" ]; then
+            CLT_HOME="$(cd "$BIN_DIR/../.." && pwd)"
+          else
+            CLT_HOME="$(cd "$BIN_DIR/.." && pwd)"
+          fi
+          chmod +x "$HVIGORW" || true
+
+          echo "CLT_HOME=$CLT_HOME" >> "$GITHUB_ENV"
+          echo "$BIN_DIR" >> "$GITHUB_PATH"
+          if [ -d "$CLT_HOME/node/bin" ]; then
+            echo "$CLT_HOME/node/bin" >> "$GITHUB_PATH"
+            echo "NODE_HOME=$CLT_HOME/node" >> "$GITHUB_ENV"
+          fi
+          if [ -d "$CLT_HOME/ohpm/bin" ]; then
+            echo "$CLT_HOME/ohpm/bin" >> "$GITHUB_PATH"
+            [ -f "$CLT_HOME/ohpm/bin/ohpm" ] && chmod +x "$CLT_HOME/ohpm/bin/ohpm" || true
+          fi
+          # Do not assume the archive's top-level layout; locate sdk/ instead.
+          SDK_DIR="$(find "$CLT_DIR" -maxdepth 4 -type d -name sdk -print -quit)"
+          if [ -n "$SDK_DIR" ]; then
+            echo "DEVECO_SDK_HOME=$SDK_DIR" >> "$GITHUB_ENV"
+            if [ -d "$SDK_DIR/default/openharmony" ]; then
+              echo "OHOS_SDK_HOME=$SDK_DIR/default/openharmony" >> "$GITHUB_ENV"
+              echo "HOS_SDK_HOME=$SDK_DIR/default/openharmony" >> "$GITHUB_ENV"
+            fi
+          fi
+
+          echo "CLT_HOME=$CLT_HOME"
+          echo "BIN_DIR=$BIN_DIR"
+          ls -la "$CLT_HOME" | head -30
+
+      - name: Show tool versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v hvigorw
+          command -v ohpm
+          hvigorw --version || echo "warning: hvigorw --version failed"
+          ohpm --version
+
+      - name: Build HAP
+        shell: bash
+        env:
+          STRIP_SIGNING: '1'
+        run: bash scripts/ci/build-hap.sh "$BUILD_MODE" "$PRODUCT"
+
+      # Optional: set all HAP_SIGN_* secrets to sign the unsigned HAP with
+      # hap-sign-tool.jar.  Without them the workflow still succeeds and
+      # uploads an unsigned HAP.
+      - name: Sign HAP
+        if: env.HAS_HAP_SIGNING == 'true'
+        shell: bash
+        env:
+          HAP_SIGN_P12: ${{ secrets.HAP_SIGN_P12 }}
+          HAP_SIGN_CER: ${{ secrets.HAP_SIGN_CER }}
+          HAP_SIGN_P7B: ${{ secrets.HAP_SIGN_P7B }}
+          HAP_SIGN_STORE_PASSWORD: ${{ secrets.HAP_SIGN_STORE_PASSWORD }}
+          HAP_SIGN_KEY_PASSWORD: ${{ secrets.HAP_SIGN_KEY_PASSWORD }}
+          HAP_SIGN_KEY_ALIAS: ${{ vars.HAP_SIGN_KEY_ALIAS || 'debugKey' }}
+        run: |
+          set -euo pipefail
+          SIGN_DIR="$RUNNER_TEMP/hap-signing"
+          rm -rf "$SIGN_DIR"
+          mkdir -p "$SIGN_DIR"
+          printf '%s' "$HAP_SIGN_P12" | base64 -d > "$SIGN_DIR/keystore.p12"
+          printf '%s' "$HAP_SIGN_CER" | base64 -d > "$SIGN_DIR/app.cer"
+          printf '%s' "$HAP_SIGN_P7B" | base64 -d > "$SIGN_DIR/app.p7b"
+
+          UNSIGNED="$(find entry/build -type f -name '*-unsigned.hap' -print -quit)"
+          if [ -z "$UNSIGNED" ]; then
+            echo "error: no unsigned HAP found to sign" >&2
+            find entry/build -type f -name '*.hap' -print
+            exit 1
+          fi
+          SIGN_TOOL="$(find "$CLT_HOME" -type f -name 'hap-sign-tool.jar' -print -quit)"
+          if [ -z "$SIGN_TOOL" ]; then
+            echo "error: hap-sign-tool.jar not found under $CLT_HOME" >&2
+            exit 1
+          fi
+
+          OUT="${UNSIGNED%-unsigned.hap}-signed.hap"
+          rm -f "$OUT"
+          java -jar "$SIGN_TOOL" sign-app \
+            -keyAlias "$HAP_SIGN_KEY_ALIAS" \
+            -signAlg SHA256withECDSA \
+            -mode localSign \
+            -appCertFile "$SIGN_DIR/app.cer" \
+            -profileFile "$SIGN_DIR/app.p7b" \
+            -inFile "$UNSIGNED" \
+            -keystoreFile "$SIGN_DIR/keystore.p12" \
+            -outFile "$OUT" \
+            -keyPwd "$HAP_SIGN_KEY_PASSWORD" \
+            -keystorePwd "$HAP_SIGN_STORE_PASSWORD"
+          ls -lh "$OUT"
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          SIGNED="$(find entry/build -type f -name '*-signed.hap' -print -quit)"
+          UNSIGNED="$(find entry/build -type f -name '*-unsigned.hap' -print -quit)"
+          if [ -n "$SIGNED" ]; then
+            cp "$SIGNED" dist/
+          elif [ -n "$UNSIGNED" ]; then
+            cp "$UNSIGNED" dist/
+          else
+            FOUND="$(find entry/build -type f -name '*.hap' -print -quit)"
+            if [ -z "$FOUND" ]; then
+              echo "error: build produced no HAP" >&2
+              exit 1
+            fi
+            cp "$FOUND" dist/
+          fi
+          ls -lh dist
+
+      - name: Upload HAP
+        uses: actions/upload-artifact@v4
+        with:
+          name: WeiboPura-${{ env.BUILD_MODE }}-${{ env.PRODUCT }}-hap
+          path: dist/*.hap
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Write summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## HarmonyOS HAP"
+            echo ""
+            printf -- '- mode: `%s`\n' "$BUILD_MODE"
+            printf -- '- product: `%s`\n' "$PRODUCT"
+            printf -- '- artifact: `WeiboPura-%s-%s-hap`\n' "$BUILD_MODE" "$PRODUCT"
+            echo ""
+            echo '```'
+            ls -lh dist 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
