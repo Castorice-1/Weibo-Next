@@ -1,8 +1,3 @@
-# 确保在构建前配置好 .npmrc
-cat > ~/.npmrc << 'EOF'
-registry=https://repo.huaweicloud.com/repository/npm/
-@ohos:registry=https://repo.harmonyos.com/npm/
-EOF
 #!/usr/bin/env bash
 # Build WeiboPura with a HarmonyOS Command Line Tools installation.
 #
@@ -10,9 +5,13 @@ EOF
 #   bash scripts/ci/build-hap.sh [debug|release] [product]
 #
 # Environment:
-#   STRIP_SIGNING=1   remove local signing config before building (for CI;
-#                     default is 1 so a machine-local path cannot break the run)
-#   STRIP_SIGNING=0   keep build-profile.json5 as-is (for local signed builds)
+#   STRIP_SIGNING=1        remove local signing config before building (for CI;
+#                          default is 1 so a machine-local path cannot break the run)
+#   STRIP_SIGNING=0        keep build-profile.json5 as-is (for local signed builds)
+#   OHOS_SCOPE_REGISTRY    override the registry used for the @ohos scope
+#                          (default: https://repo.harmonyos.com/npm/)
+#   NPM_REGISTRY           override the default registry (default:
+#                          https://repo.huaweicloud.com/repository/npm/)
 #
 # The script expects `ohpm` and `hvigorw` to be in PATH.  See
 # docs/online-build.md for the GitHub Actions setup that supplies them.
@@ -52,6 +51,48 @@ for tool in ohpm hvigorw; do
     exit 127
   fi
 done
+
+# ---------------------------------------------------------------------------
+# HarmonyOS tooling (hvigor + pnpm) needs an .npmrc that maps the @ohos scope
+# to Huawei's registry.  A fresh CI runner has no ~/.npmrc, which triggers:
+#   hvigor ERROR: 00303137 ... No npmrc file is matched
+#   ERR_PNPM_FETCH_404 ... @ohos/hvigor is not in the npm registry
+# Create/patch ~/.npmrc idempotently so a developer's existing settings are
+# preserved.
+# ---------------------------------------------------------------------------
+ensure_npmrc() {
+  if [ -z "${HOME:-}" ]; then
+    echo "error: HOME is not set; cannot locate user .npmrc" >&2
+    exit 1
+  fi
+
+  local npmrc="${HOME}/.npmrc"
+  local scope_registry="${OHOS_SCOPE_REGISTRY:-https://repo.harmonyos.com/npm/}"
+  local default_registry="${NPM_REGISTRY:-https://repo.huaweicloud.com/repository/npm/}"
+
+  if ! touch "$npmrc" 2>/dev/null; then
+    echo "error: cannot create or write $npmrc" >&2
+    exit 1
+  fi
+
+  # Accept keys with optional surrounding whitespace, e.g.
+  #   @ohos:registry = https://...
+  if ! grep -qE '^[[:space:]]*@ohos:registry[[:space:]]*=' "$npmrc"; then
+    printf '@ohos:registry=%s\n' "$scope_registry" >> "$npmrc"
+    echo "info: added @ohos:registry to $npmrc"
+  fi
+
+  if ! grep -qE '^[[:space:]]*registry[[:space:]]*=' "$npmrc"; then
+    printf 'registry=%s\n' "$default_registry" >> "$npmrc"
+    echo "info: set default registry in $npmrc"
+  fi
+
+  echo "info: active .npmrc ($npmrc):"
+  # Never print anything that looks like a token/password line.
+  grep -vE '(_authToken|_auth|password)[[:space:]]*=' "$npmrc" | sed 's/^/  /'
+}
+
+ensure_npmrc
 
 if [ "$STRIP_SIGNING" = "1" ]; then
   "$PYTHON" scripts/ci/strip-signing.py build-profile.json5
