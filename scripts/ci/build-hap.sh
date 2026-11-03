@@ -1,3 +1,8 @@
+# 确保在构建前配置好 .npmrc
+cat > ~/.npmrc << 'EOF'
+registry=https://repo.huaweicloud.com/repository/npm/
+@ohos:registry=https://repo.harmonyos.com/npm/
+EOF
 #!/usr/bin/env bash
 # Build WeiboPura with a HarmonyOS Command Line Tools installation.
 #
