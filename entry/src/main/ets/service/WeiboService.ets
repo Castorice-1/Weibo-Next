@@ -89,6 +89,17 @@ interface WeiboPictureJson {
   largest?: WeiboPictureSizeJson;
   mw2000?: WeiboPictureSizeJson;
   original?: WeiboPictureSizeJson;
+  /** `livephoto` for 实况图; ordinary pictures omit it. */
+  type?: string;
+  /**
+   * Weibo wraps the real `.mov` in a player URL:
+   * https://video.weibo.com/media/play?livephoto=<url-encoded mov>
+   */
+  videoSrc?: string;
+  video?: string;
+  video_url?: string;
+  livephoto_url?: string;
+  motion_url?: string;
 }
 
 interface WeiboPictureSizeJson {
@@ -536,9 +547,69 @@ export class WeiboService {
     };
   }
 
+  /**
+   * Decode the real live-photo file from Weibo's player wrapper.  The mobile
+   * endpoint exposes either a `videoSrc` player URL (with the `.mov` in its
+   * `livephoto` query parameter) or one of several direct URL fields depending
+   * on the surface.  Returning '' keeps static pictures cheap and unambiguous.
+   */
+  private toLivePhotoUrl(picture: WeiboPictureJson): string {
+    const isLive: boolean = picture.type === 'livephoto'
+      || (typeof picture.videoSrc === 'string' && picture.videoSrc.indexOf('livephoto') >= 0)
+      || typeof picture.livephoto_url === 'string'
+      || typeof picture.motion_url === 'string';
+    if (!isLive) {
+      return '';
+    }
+    const wrapper: string = typeof picture.videoSrc === 'string' ? picture.videoSrc : '';
+    const decoded: string = this.decodeLivePhotoWrapper(wrapper);
+    if (decoded.length > 0) {
+      return decoded;
+    }
+    if (typeof picture.video === 'string' && picture.video.length > 0) {
+      return picture.video;
+    }
+    if (typeof picture.video_url === 'string' && picture.video_url.length > 0) {
+      return picture.video_url;
+    }
+    if (typeof picture.livephoto_url === 'string' && picture.livephoto_url.length > 0) {
+      return picture.livephoto_url;
+    }
+    if (typeof picture.motion_url === 'string' && picture.motion_url.length > 0) {
+      return picture.motion_url;
+    }
+    return '';
+  }
+
+  private decodeLivePhotoWrapper(wrapper: string): string {
+    if (wrapper.length === 0) {
+      return '';
+    }
+    const marker: string = 'livephoto=';
+    const at: number = wrapper.indexOf(marker);
+    if (at >= 0) {
+      let encoded: string = wrapper.substring(at + marker.length);
+      const ampersand: number = encoded.indexOf('&');
+      if (ampersand >= 0) {
+        encoded = encoded.substring(0, ampersand);
+      }
+      try {
+        return decodeURIComponent(encoded);
+      } catch (error) {
+        return encoded;
+      }
+    }
+    // Some responses already contain the direct https URL.
+    if (wrapper.indexOf('http') === 0) {
+      return wrapper;
+    }
+    return '';
+  }
+
   private toPost(source: WeiboPostJson): WeiboPost {
     const author: WeiboUser = this.toUser(source.user ?? {});
     const pictures: string[] = [];
+    const livePictures: string[] = [];
     const pictureSource: WeiboPictureJson[] = source.pics ?? [];
     for (let index: number = 0; index < pictureSource.length; index++) {
       const picture: WeiboPictureJson = pictureSource[index];
@@ -552,6 +623,7 @@ export class WeiboService {
         ?? '';
       if (imageUrl.length > 0) {
         pictures.push(imageUrl);
+        livePictures.push(this.toLivePhotoUrl(picture));
       }
     }
     const pageInfo: WeiboPageInfoJson | undefined = source.page_info;
@@ -580,6 +652,7 @@ export class WeiboService {
       userAvatar: author.avatarUrl,
       text: stripHtml(source.text ?? ''),
       pictures: pictures,
+      livePictures: livePictures,
       videoUrl: videoUrl,
       videoCoverUrl: videoCoverUrl,
       createdAt: formatWeiboTime(source.created_at ?? ''),
