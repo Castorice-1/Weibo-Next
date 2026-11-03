@@ -73,6 +73,8 @@ export interface ThreadItemData {
   abstract: string;
   firstImage: string;
   images?: string[];
+  /** Live-photo video URL aligned with `images`; empty entries are still images. */
+  imageLiveUrls?: string[];
   /** Optional public MP4 stream. Empty for ordinary text/image posts. */
   videoUrl?: string;
   /** Poster shown by the native video player while a stream prepares. */
@@ -90,6 +92,23 @@ export interface ThreadSharePayload {
   author: string;
   abstract: string;
   firstImage: string;
+}
+
+/** Small "LIVE" marker used by live-photo cards and preview surfaces. */
+@Component
+export struct LivePhotoBadge {
+  @StorageLink('fontScale') fontScale: number = 1.0;
+
+  build() {
+    Text('LIVE')
+      .fontSize(fs(9, this.fontScale))
+      .fontWeight(FontWeight.Bold)
+      .fontColor(Color.White)
+      .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+      .backgroundColor('#A6000000')
+      .borderRadius(4)
+      .margin({ left: 6, bottom: 6 })
+  }
 }
 
 /**
@@ -260,6 +279,7 @@ export struct ThreadCard {
     abstract: '',
     firstImage: '',
     images: [],
+    imageLiveUrls: [],
     videoUrl: '',
     videoCoverUrl: '',
     createTime: '',
@@ -275,7 +295,7 @@ export struct ThreadCard {
   // 头像点击回调：由父组件(Index/ThreadList)注入实现，跳转用户主页
   onAvatarTap: (authorId: string, author: string) => void = () => {};
   /** Parent-owned image navigation; non-Weibo callers retain their existing behavior. */
-  onImageTap: (urls: string[], index: number) => void = () => {};
+  onImageTap: (urls: string[], index: number, liveUrls?: string[]) => void = () => {};
   /**
    * 微博等非贴吧图床直接交给 ArkUI Image 加载。ImageCache 的下载策略带贴吧专用
    * Referer/Cookie，不能用于其它内容源。
@@ -501,6 +521,11 @@ export struct ThreadCard {
       return Math.min(imgs.length, 9);
     }
     return 0;
+  }
+
+  private isLiveImage(idx: number): boolean {
+    const live: string[] | undefined = this.getItem().imageLiveUrls;
+    return !!live && idx < live.length && live[idx].length > 0;
   }
 
   private updateContentPress(event?: TouchEvent): void {
@@ -882,38 +907,52 @@ export struct ThreadCard {
           // 封顶 220：列宽变宽时 aspectRatio(1.6) 会等比放大高度，真机上出现"图比手机还大"，
           // 锁死手机基线高度后只横向扩展、纵向不再无限放大。
           if (this.cardColumns > 1) {
-            Image(this.resolveImgUrl(this.getItem().images![0]))
-              .width('100%')
-              .aspectRatio(1.6)
-              .constraintSize({ maxHeight: 220 })
-              .borderRadius(Radius.md)
-              .objectFit(ImageFit.Cover)
-              .onError(() => {
-                this.handleSingleImageError();
-              })
-              .onComplete((event) => {
-                if (!event) return;
-                this.handleSingleImageComplete(event.loadingStatus, event.width, event.height);
-              })
-              .onClick(() => {
-                this.onImageTap(this.getItem().images!, 0);
-              })
+            Stack({ alignContent: Alignment.BottomStart }) {
+              Image(this.resolveImgUrl(this.getItem().images![0]))
+                .width('100%')
+                .height('100%')
+                .borderRadius(Radius.md)
+                .objectFit(ImageFit.Cover)
+                .onError(() => {
+                  this.handleSingleImageError();
+                })
+                .onComplete((event) => {
+                  if (!event) return;
+                  this.handleSingleImageComplete(event.loadingStatus, event.width, event.height);
+                })
+              if (this.isLiveImage(0)) {
+                LivePhotoBadge()
+              }
+            }
+            .width('100%')
+            .aspectRatio(1.6)
+            .constraintSize({ maxHeight: 220 })
+            .onClick(() => {
+              this.onImageTap(this.getItem().images!, 0, this.getItem().imageLiveUrls);
+            })
           } else {
-            Image(this.resolveImgUrl(this.getItem().images![0]))
-              .width('100%')
-              .height(220)
-              .borderRadius(Radius.md)
-              .objectFit(ImageFit.Cover)
-              .onError(() => {
-                this.handleSingleImageError();
-              })
-              .onComplete((event) => {
-                if (!event) return;
-                this.handleSingleImageComplete(event.loadingStatus, event.width, event.height);
-              })
-              .onClick(() => {
-                this.onImageTap(this.getItem().images!, 0);
-              })
+            Stack({ alignContent: Alignment.BottomStart }) {
+              Image(this.resolveImgUrl(this.getItem().images![0]))
+                .width('100%')
+                .height('100%')
+                .borderRadius(Radius.md)
+                .objectFit(ImageFit.Cover)
+                .onError(() => {
+                  this.handleSingleImageError();
+                })
+                .onComplete((event) => {
+                  if (!event) return;
+                  this.handleSingleImageComplete(event.loadingStatus, event.width, event.height);
+                })
+              if (this.isLiveImage(0)) {
+                LivePhotoBadge()
+              }
+            }
+            .width('100%')
+            .height(220)
+            .onClick(() => {
+              this.onImageTap(this.getItem().images!, 0, this.getItem().imageLiveUrls);
+            })
           }
         } else {
           // 多图网格（2-9张），使用 Grid 实现均匀间距
@@ -924,40 +963,54 @@ export struct ThreadCard {
                 // 改 1:1 比例，避免比例失真（§4.2 决策 6）。两种写法互斥（height 与 aspectRatio 同设会冲突）。
                 // 封顶同单列档：防止列宽变宽后多图格也变得比手机大。
                 if (this.cardColumns > 1) {
-                  Image(this.resolveImgUrl(img))
-                    .width('100%')
-                    .aspectRatio(1)
-                    .constraintSize({
-                      maxHeight: (this.getImageCount() === 2 || this.getImageCount() === 4) ? 140 : 100
-                    })
-                    .borderRadius(Radius.md)
-                    .objectFit(ImageFit.Cover)
-                    .onError(() => {
-                      this.handleGridImageError(img);
-                    })
-                    .onComplete((event) => {
-                      if (!event) return;
-                      this.handleGridImageComplete(img, event.loadingStatus, event.width, event.height);
-                    })
-                    .onClick(() => {
-                      this.onImageTap(this.getItem().images!, idx);
-                    })
+                  Stack({ alignContent: Alignment.BottomStart }) {
+                    Image(this.resolveImgUrl(img))
+                      .width('100%')
+                      .height('100%')
+                      .borderRadius(Radius.md)
+                      .objectFit(ImageFit.Cover)
+                      .onError(() => {
+                        this.handleGridImageError(img);
+                      })
+                      .onComplete((event) => {
+                        if (!event) return;
+                        this.handleGridImageComplete(img, event.loadingStatus, event.width, event.height);
+                      })
+                    if (this.isLiveImage(idx)) {
+                      LivePhotoBadge()
+                    }
+                  }
+                  .width('100%')
+                  .aspectRatio(1)
+                  .constraintSize({
+                    maxHeight: (this.getImageCount() === 2 || this.getImageCount() === 4) ? 140 : 100
+                  })
+                  .onClick(() => {
+                    this.onImageTap(this.getItem().images!, idx, this.getItem().imageLiveUrls);
+                  })
                 } else {
-                  Image(this.resolveImgUrl(img))
-                    .width('100%')
-                    .height((this.getImageCount() === 2 || this.getImageCount() === 4) ? 140 : 100)
-                    .borderRadius(Radius.md)
-                    .objectFit(ImageFit.Cover)
-                    .onError(() => {
-                      this.handleGridImageError(img);
-                    })
-                    .onComplete((event) => {
-                      if (!event) return;
-                      this.handleGridImageComplete(img, event.loadingStatus, event.width, event.height);
-                    })
-                    .onClick(() => {
-                      this.onImageTap(this.getItem().images!, idx);
-                    })
+                  Stack({ alignContent: Alignment.BottomStart }) {
+                    Image(this.resolveImgUrl(img))
+                      .width('100%')
+                      .height('100%')
+                      .borderRadius(Radius.md)
+                      .objectFit(ImageFit.Cover)
+                      .onError(() => {
+                        this.handleGridImageError(img);
+                      })
+                      .onComplete((event) => {
+                        if (!event) return;
+                        this.handleGridImageComplete(img, event.loadingStatus, event.width, event.height);
+                      })
+                    if (this.isLiveImage(idx)) {
+                      LivePhotoBadge()
+                    }
+                  }
+                  .width('100%')
+                  .height((this.getImageCount() === 2 || this.getImageCount() === 4) ? 140 : 100)
+                  .onClick(() => {
+                    this.onImageTap(this.getItem().images!, idx, this.getItem().imageLiveUrls);
+                  })
                 }
               }
             }, (img: string, idx: number) => `${idx}`)
