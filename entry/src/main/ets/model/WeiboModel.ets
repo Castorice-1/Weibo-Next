@@ -26,6 +26,11 @@ export interface WeiboPost {
   userAvatar: string;
   text: string;
   pictures: string[];
+  /**
+   * Live-photo video URL for each entry in `pictures`, aligned by index.
+   * Empty string means the picture is an ordinary still image.
+   */
+  livePictures: string[];
   /** A directly playable MP4 stream supplied by the mobile status endpoint. */
   videoUrl: string;
   /** Poster image for the video stream; used while the player is preparing. */
